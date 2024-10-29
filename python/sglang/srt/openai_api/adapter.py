@@ -718,41 +718,30 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                     prompt_tokens[index] = content["meta_info"]["prompt_tokens"]
                     completion_tokens[index] = content["meta_info"]["completion_tokens"]
 
-                    if not stream_buffer:  # The first chunk
+                    if not stream_buffer:  # Le premier chunk
                         if request.echo:
                             if isinstance(request.prompt, str):
-                                # for the case of single str prompts
                                 prompts = request.prompt
                             elif isinstance(request.prompt, list):
                                 if isinstance(request.prompt[0], str):
-                                    # for the case of multiple str prompts
                                     prompts = request.prompt[index // request.n]
                                 elif isinstance(request.prompt[0], int):
-                                    # for the case of single token ids prompt
                                     prompts = tokenizer_manager.tokenizer.decode(
                                         request.prompt, skip_special_tokens=True
                                     )
                                 elif isinstance(request.prompt[0], list) and isinstance(
                                     request.prompt[0][0], int
                                 ):
-                                    # for the case of multiple token ids prompts
                                     prompts = tokenizer_manager.tokenizer.decode(
                                         request.prompt[index // request.n],
                                         skip_special_tokens=True,
                                     )
-
-                            # Prepend prompt in response text.
                             text = prompts + text
 
                     if request.logprobs:
-                        # The first chunk and echo is enabled.
                         if not stream_buffer and request.echo:
-                            input_token_logprobs = content["meta_info"][
-                                "input_token_logprobs"
-                            ]
-                            input_top_logprobs = content["meta_info"][
-                                "input_top_logprobs"
-                            ]
+                            input_token_logprobs = content["meta_info"]["input_token_logprobs"]
+                            input_top_logprobs = content["meta_info"]["input_top_logprobs"]
                         else:
                             input_token_logprobs = None
                             input_top_logprobs = None
@@ -760,20 +749,15 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                         logprobs = to_openai_style_logprobs(
                             input_token_logprobs=input_token_logprobs,
                             input_top_logprobs=input_top_logprobs,
-                            output_token_logprobs=content["meta_info"][
-                                "output_token_logprobs"
-                            ][n_prev_token:],
-                            output_top_logprobs=content["meta_info"][
-                                "output_top_logprobs"
-                            ][n_prev_token:],
+                            output_token_logprobs=content["meta_info"]["output_token_logprobs"][n_prev_token:],
+                            output_top_logprobs=content["meta_info"]["output_top_logprobs"][n_prev_token:],
+                            return_token_ids=True,  # Ajouter ce paramètre
                         )
-                        n_prev_token = len(
-                            content["meta_info"]["output_token_logprobs"]
-                        )
+                        n_prev_token = len(content["meta_info"]["output_token_logprobs"])
                     else:
                         logprobs = None
 
-                    delta = text[len(stream_buffer) :]
+                    delta = text[len(stream_buffer):]
                     stream_buffer = stream_buffer + delta
                     finish_reason = content["meta_info"]["finish_reason"]
                     choice_data = CompletionResponseStreamChoice(
@@ -798,6 +782,7 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                     n_prev_tokens[index] = n_prev_token
 
                     yield f"data: {chunk.model_dump_json()}\n\n"
+                # ... le reste du code ...
                 if request.stream_options and request.stream_options.include_usage:
                     total_prompt_tokens = sum(
                         tokens
@@ -1126,17 +1111,12 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                     completion_tokens[index] = content["meta_info"]["completion_tokens"]
                     if request.logprobs:
                         logprobs = to_openai_style_logprobs(
-                            output_token_logprobs=content["meta_info"][
-                                "output_token_logprobs"
-                            ][n_prev_token:],
-                            output_top_logprobs=content["meta_info"][
-                                "output_top_logprobs"
-                            ][n_prev_token:],
+                            output_token_logprobs=content["meta_info"]["output_token_logprobs"][n_prev_token:],
+                            output_top_logprobs=content["meta_info"]["output_top_logprobs"][n_prev_token:],
+                            return_token_ids=True,  # Ajouter ce paramètre
                         )
 
-                        n_prev_token = len(
-                            content["meta_info"]["output_token_logprobs"]
-                        )
+                        n_prev_token = len(content["meta_info"]["output_token_logprobs"])
                         token_logprobs = []
                         for token, logprob in zip(
                             logprobs.tokens, logprobs.token_logprobs
@@ -1144,9 +1124,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                             token_bytes = list(token.encode("utf-8"))
                             top_logprobs = []
                             if logprobs.top_logprobs:
-                                for top_token, top_logprob in logprobs.top_logprobs[
-                                    0
-                                ].items():
+                                for top_token, top_logprob in logprobs.top_logprobs[0].items():
                                     top_token_bytes = list(top_token.encode("utf-8"))
                                     top_logprobs.append(
                                         TopLogprob(
@@ -1172,14 +1150,11 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                     finish_reason = content["meta_info"]["finish_reason"]
 
                     if is_first:
-                        # First chunk with role
                         is_first = False
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
                             delta=DeltaMessage(role="assistant"),
-                            finish_reason=(
-                                finish_reason["type"] if finish_reason else ""
-                            ),
+                            finish_reason=(finish_reason["type"] if finish_reason else ""),
                             matched_stop=(
                                 finish_reason["matched"]
                                 if finish_reason and "matched" in finish_reason
@@ -1195,7 +1170,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                         yield f"data: {chunk.model_dump_json()}\n\n"
 
                     text = content["text"]
-                    delta = text[len(stream_buffer) :]
+                    delta = text[len(stream_buffer):]
                     stream_buffer = stream_buffer + delta
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
@@ -1219,6 +1194,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                     n_prev_tokens[index] = n_prev_token
 
                     yield f"data: {chunk.model_dump_json()}\n\n"
+                # ... le reste du code ...
                 if request.stream_options and request.stream_options.include_usage:
                     total_prompt_tokens = sum(
                         tokens
@@ -1352,22 +1328,27 @@ def to_openai_style_logprobs(
     output_token_logprobs=None,
     input_top_logprobs=None,
     output_top_logprobs=None,
+    return_token_ids=False,  # Nouveau paramètre ajouté
 ):
     ret_logprobs = LogProbs()
 
     def append_token_logprobs(token_logprobs):
-        for logprob, _, token_text in token_logprobs:
-            ret_logprobs.tokens.append(token_text)
+        for logprob, token_id, token_text in token_logprobs:
+            if return_token_ids:
+                ret_logprobs.tokens.append(f"token_id:{token_id}")
+            else:
+                ret_logprobs.tokens.append(token_text)
             ret_logprobs.token_logprobs.append(logprob)
-
-            # Not supported yet
             ret_logprobs.text_offset.append(-1)
 
     def append_top_logprobs(top_logprobs):
         for tokens in top_logprobs:
             if tokens is not None:
                 ret_logprobs.top_logprobs.append(
-                    {token[2]: token[0] for token in tokens}
+                    {
+                        (f"token_id:{token_id}" if return_token_ids else token_text): logprob
+                        for logprob, token_id, token_text in tokens
+                    }
                 )
             else:
                 ret_logprobs.top_logprobs.append(None)
