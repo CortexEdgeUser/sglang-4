@@ -1349,22 +1349,27 @@ def to_openai_style_logprobs(
     output_token_logprobs=None,
     input_top_logprobs=None,
     output_top_logprobs=None,
+    return_token_ids=True,  # New parameter added
 ):
     ret_logprobs = LogProbs()
 
     def append_token_logprobs(token_logprobs):
-        for logprob, _, token_text in token_logprobs:
-            ret_logprobs.tokens.append(token_text)
+        for logprob, token_id, token_text in token_logprobs:
+            if return_token_ids:
+                ret_logprobs.tokens.append(f"token_id:{token_id}")
+            else:
+                ret_logprobs.tokens.append(token_text)
             ret_logprobs.token_logprobs.append(logprob)
-
-            # Not supported yet
             ret_logprobs.text_offset.append(-1)
 
     def append_top_logprobs(top_logprobs):
         for tokens in top_logprobs:
             if tokens is not None:
                 ret_logprobs.top_logprobs.append(
-                    {token[2]: token[0] for token in tokens}
+                    {
+                        (f"token_id:{token_id}" if return_token_ids else token_text): logprob
+                        for logprob, token_id, token_text in tokens
+                    }
                 )
             else:
                 ret_logprobs.top_logprobs.append(None)
