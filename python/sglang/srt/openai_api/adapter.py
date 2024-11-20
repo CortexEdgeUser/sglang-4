@@ -14,6 +14,7 @@ limitations under the License.
 """
 
 """Conversion between OpenAI APIs and native SRT APIs"""
+import itertools
 
 import asyncio
 import json
@@ -685,7 +686,16 @@ def v1_generate_response(request, ret, tokenizer_manager, to_file=False):
         )
     return response
 
-
+async def buffer_chunks(generator, batch_size=40):
+    buffer = []
+    async for chunk in generator:
+        buffer.append(chunk)
+        if len(buffer) >= batch_size:
+            yield ''.join(buffer)
+            buffer = []
+    if buffer:
+        yield ''.join(buffer)
+        
 async def v1_completions(tokenizer_manager, raw_request: Request):
     request_json = await raw_request.json()
     all_requests = [CompletionRequest(**request_json)]
@@ -698,6 +708,7 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
             n_prev_tokens = {}
             prompt_tokens = {}
             completion_tokens = {}
+            buffer = []
             try:
                 async for content in tokenizer_manager.generate_request(
                     adapted_request, raw_request
@@ -711,34 +722,27 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                     prompt_tokens[index] = content["meta_info"]["prompt_tokens"]
                     completion_tokens[index] = content["meta_info"]["completion_tokens"]
 
-                    if not stream_buffer:  # The first chunk
-                        if request.echo:
-                            if isinstance(request.prompt, str):
-                                # for the case of single str prompts
-                                prompts = request.prompt
-                            elif isinstance(request.prompt, list):
-                                if isinstance(request.prompt[0], str):
-                                    # for the case of multiple str prompts
-                                    prompts = request.prompt[index // request.n]
-                                elif isinstance(request.prompt[0], int):
-                                    # for the case of single token ids prompt
-                                    prompts = tokenizer_manager.tokenizer.decode(
-                                        request.prompt, skip_special_tokens=True
-                                    )
-                                elif isinstance(request.prompt[0], list) and isinstance(
-                                    request.prompt[0][0], int
-                                ):
-                                    # for the case of multiple token ids prompts
-                                    prompts = tokenizer_manager.tokenizer.decode(
-                                        request.prompt[index // request.n],
-                                        skip_special_tokens=True,
-                                    )
+                    if request.echo:
+                        if isinstance(request.prompt, str):
+                            prompts = request.prompt
+                        elif isinstance(request.prompt, list):
+                            if isinstance(request.prompt[0], str):
+                                prompts = request.prompt[index // request.n]
+                            elif isinstance(request.prompt[0], int):
+                                prompts = tokenizer_manager.tokenizer.decode(
+                                    request.prompt, skip_special_tokens=True
+                                )
+                            elif isinstance(request.prompt[0], list) and isinstance(
+                                request.prompt[0][0], int
+                            ):
+                                prompts = tokenizer_manager.tokenizer.decode(
+                                    request.prompt[index // request.n],
+                                    skip_special_tokens=True,
+                                )
 
-                            # Prepend prompt in response text.
-                            text = prompts + text
+                        text = prompts + text
 
                     if request.logprobs:
-                        # The first chunk and echo is enabled.
                         if not stream_buffer and request.echo:
                             input_token_logprobs = content["meta_info"][
                                 "input_token_logprobs"
@@ -755,20 +759,18 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                             input_top_logprobs=input_top_logprobs,
                             output_token_logprobs=content["meta_info"][
                                 "output_token_logprobs"
-                            ][n_prev_token:],
+                            ],
                             output_top_logprobs=content["meta_info"][
                                 "output_top_logprobs"
-                            ][n_prev_token:],
-                        )
-                        n_prev_token = len(
-                            content["meta_info"]["output_token_logprobs"]
+                            ],
                         )
                     else:
                         logprobs = None
 
-                    delta = text[len(stream_buffer) :]
+                    delta = text[len(stream_buffer):]
                     stream_buffer = stream_buffer + delta
                     finish_reason = content["meta_info"]["finish_reason"]
+
                     choice_data = CompletionResponseStreamChoice(
                         index=index,
                         text=delta,
@@ -790,7 +792,14 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                     stream_buffers[index] = stream_buffer
                     n_prev_tokens[index] = n_prev_token
 
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    buffer.append(f"data: {chunk.model_dump_json()}\n\n")
+                    if len(buffer) >= 40:
+                        yield ''.join(buffer)
+                        buffer = []
+
+                if buffer:
+                    yield ''.join(buffer)
+
                 if request.stream_options and request.stream_options.include_usage:
                     total_prompt_tokens = sum(
                         tokens
@@ -818,11 +827,15 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                     yield f"data: {final_usage_data}\n\n"
             except ValueError as e:
                 error = create_streaming_error_response(str(e))
-                yield f"data: {error}\n\n"
+                buffer.append(f"data: {error}\n\n")
+                if len(buffer) >= 40:
+                    yield ''.join(buffer)
+                    buffer = []
+                yield ''.join(buffer)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(
-            generate_stream_resp(),
+            buffer_chunks(generate_stream_resp()),
             media_type="text/event-stream",
             background=tokenizer_manager.create_abort_task(adapted_request),
         )
@@ -1109,6 +1122,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
             n_prev_tokens = {}
             prompt_tokens = {}
             completion_tokens = {}
+            buffer = []
             try:
                 async for content in tokenizer_manager.generate_request(
                     adapted_request, raw_request
@@ -1189,10 +1203,14 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                             choices=[choice_data],
                             model=request.model,
                         )
-                        yield f"data: {chunk.model_dump_json()}\n\n"
+                        buffer.append(f"data: {chunk.model_dump_json()}\n\n")
+                        is_firsts[index] = is_first
+                        if len(buffer) >= 40:
+                            yield ''.join(buffer)
+                            buffer = []
 
                     text = content["text"]
-                    delta = text[len(stream_buffer) :]
+                    delta = text[len(stream_buffer):]
                     stream_buffer = stream_buffer + delta
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
@@ -1211,11 +1229,17 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                         model=request.model,
                     )
 
-                    is_firsts[index] = is_first
                     stream_buffers[index] = stream_buffer
                     n_prev_tokens[index] = n_prev_token
 
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    buffer.append(f"data: {chunk.model_dump_json()}\n\n")
+                    if len(buffer) >= 40:
+                        yield ''.join(buffer)
+                        buffer = []
+
+                if buffer:
+                    yield ''.join(buffer)
+
                 if request.stream_options and request.stream_options.include_usage:
                     total_prompt_tokens = sum(
                         tokens
@@ -1240,14 +1264,24 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                     final_usage_data = final_usage_chunk.model_dump_json(
                         exclude_unset=True, exclude_none=True
                     )
-                    yield f"data: {final_usage_data}\n\n"
+                    buffer.append(f"data: {final_usage_data}\n\n")
+                    if len(buffer) >= 40:
+                        yield ''.join(buffer)
+                        buffer = []
+                    else:
+                        yield ''.join(buffer)
+
             except ValueError as e:
                 error = create_streaming_error_response(str(e))
-                yield f"data: {error}\n\n"
+                buffer.append(f"data: {error}\n\n")
+                if len(buffer) >= 40:
+                    yield ''.join(buffer)
+                    buffer = []
+                yield ''.join(buffer)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(
-            generate_stream_resp(),
+            buffer_chunks(generate_stream_resp()),
             media_type="text/event-stream",
             background=tokenizer_manager.create_abort_task(adapted_request),
         )
