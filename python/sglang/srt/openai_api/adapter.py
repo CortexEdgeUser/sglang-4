@@ -77,6 +77,7 @@ logger = logging.getLogger(__name__)
 
 chat_template_name = None
 
+BUFFER_SIZE = 25
 
 class FileMetadata:
     def __init__(self, filename: str, purpose: str):
@@ -698,7 +699,7 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
             n_prev_tokens: Dict[int, int] = {}
             prompt_tokens: Dict[int, int] = {}
             completion_tokens: Dict[int, int] = {}
-            buffer_size = 5  # Set buffer size to 5
+            buffer_size = BUFFER_SIZE
             buffer_list: List[str] = []  # Initialize buffer list
 
             try:
@@ -1122,7 +1123,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
             n_prev_tokens: Dict[int, int] = {}
             prompt_tokens: Dict[int, int] = {}
             completion_tokens: Dict[int, int] = {}
-            buffer_size = 5  # Taille du tampon
+            buffer_size = BUFFER_SIZE
             buffer_list: List[str] = []  # Liste pour stocker les chunks temporairement
 
             try:
