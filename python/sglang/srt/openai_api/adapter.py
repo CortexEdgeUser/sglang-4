@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 
 chat_template_name = None
 
-BUFFER_SIZE = 25
+BUFFER_SIZE = 100
 
 class FileMetadata:
     def __init__(self, filename: str, purpose: str):
