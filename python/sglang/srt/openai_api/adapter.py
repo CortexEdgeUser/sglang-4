@@ -1,16 +1,18 @@
-# Copyright 2023-2024 SGLang Team
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+"""
+Copyright 2023-2024 SGLang Team
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
 """Conversion between OpenAI APIs and native SRT APIs"""
 
 import asyncio
@@ -75,7 +77,6 @@ logger = logging.getLogger(__name__)
 
 chat_template_name = None
 
-BUFFER_SIZE = 59
 
 class FileMetadata:
     def __init__(self, filename: str, purpose: str):
@@ -693,13 +694,10 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
     if adapted_request.stream:
 
         async def generate_stream_resp():
-            stream_buffers: Dict[int, str] = {}
-            n_prev_tokens: Dict[int, int] = {}
-            prompt_tokens: Dict[int, int] = {}
-            completion_tokens: Dict[int, int] = {}
-            buffer_size = BUFFER_SIZE
-            buffer_list: List[str] = []  # Initialize buffer list
-
+            stream_buffers = {}
+            n_prev_tokens = {}
+            prompt_tokens = {}
+            completion_tokens = {}
             try:
                 async for content in tokenizer_manager.generate_request(
                     adapted_request, raw_request
@@ -792,18 +790,7 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
                     stream_buffers[index] = stream_buffer
                     n_prev_tokens[index] = n_prev_token
 
-                    # Add the chunk to the buffer list
-                    buffer_list.append(f"data: {chunk.model_dump_json()}\n\n")
-
-                    # If buffer is full, yield the buffered data and reset the buffer
-                    if len(buffer_list) >= buffer_size:
-                        yield ''.join(buffer_list)
-                        buffer_list = []
-
-                # After the loop, yield any remaining buffered data
-                if buffer_list:
-                    yield ''.join(buffer_list)
-
+                    yield f"data: {chunk.model_dump_json()}\n\n"
                 if request.stream_options and request.stream_options.include_usage:
                     total_prompt_tokens = sum(
                         tokens
@@ -853,6 +840,7 @@ async def v1_completions(tokenizer_manager, raw_request: Request):
 
     response = v1_generate_response(request, ret, tokenizer_manager)
     return response
+
 
 def v1_chat_generate_request(
     all_requests: List[ChatCompletionRequest],
@@ -1116,14 +1104,11 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
     if adapted_request.stream:
 
         async def generate_stream_resp():
-            is_firsts: Dict[int, bool] = {}
-            stream_buffers: Dict[int, str] = {}
-            n_prev_tokens: Dict[int, int] = {}
-            prompt_tokens: Dict[int, int] = {}
-            completion_tokens: Dict[int, int] = {}
-            buffer_size = BUFFER_SIZE
-            buffer_list: List[str] = []  # Liste pour stocker les chunks temporairement
-
+            is_firsts = {}
+            stream_buffers = {}
+            n_prev_tokens = {}
+            prompt_tokens = {}
+            completion_tokens = {}
             try:
                 async for content in tokenizer_manager.generate_request(
                     adapted_request, raw_request
@@ -1136,7 +1121,6 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
 
                     prompt_tokens[index] = content["meta_info"]["prompt_tokens"]
                     completion_tokens[index] = content["meta_info"]["completion_tokens"]
-
                     if request.logprobs:
                         logprobs = to_openai_style_logprobs(
                             output_token_logprobs=content["meta_info"][
@@ -1185,7 +1169,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                     finish_reason = content["meta_info"]["finish_reason"]
 
                     if is_first:
-                        # Premier chunk avec le rôle
+                        # First chunk with role
                         is_first = False
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=index,
@@ -1205,11 +1189,11 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                             choices=[choice_data],
                             model=request.model,
                         )
-                        buffer_list.append(f"data: {chunk.model_dump_json()}\n\n")
+                        yield f"data: {chunk.model_dump_json()}\n\n"
 
                     text = content["text"]
                     delta = text[len(stream_buffer) :]
-                    stream_buffer += delta
+                    stream_buffer = stream_buffer + delta
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=DeltaMessage(content=delta),
@@ -1231,17 +1215,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
                     stream_buffers[index] = stream_buffer
                     n_prev_tokens[index] = n_prev_token
 
-                    buffer_list.append(f"data: {chunk.model_dump_json()}\n\n")
-
-                    # Vérifier si le tampon a atteint la taille limite
-                    if len(buffer_list) >= buffer_size:
-                        yield ''.join(buffer_list)
-                        buffer_list = []
-
-                # Après la boucle, envoyer les chunks restants dans le tampon
-                if buffer_list:
-                    yield ''.join(buffer_list)
-
+                    yield f"data: {chunk.model_dump_json()}\n\n"
                 if request.stream_options and request.stream_options.include_usage:
                     total_prompt_tokens = sum(
                         tokens
@@ -1278,7 +1252,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
             background=tokenizer_manager.create_abort_task(adapted_request),
         )
 
-    # Réponse non-streaming.
+    # Non-streaming response.
     try:
         ret = await tokenizer_manager.generate_request(
             adapted_request, raw_request
@@ -1293,6 +1267,7 @@ async def v1_chat_completions(tokenizer_manager, raw_request: Request):
     )
 
     return response
+
 
 def v1_embedding_request(all_requests, tokenizer_manager):
     prompts = []
