@@ -1,18 +1,16 @@
-"""
-Copyright 2023-2024 SGLang Team
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 """ModelRunner runs the forward passes of the models."""
 
 import gc
@@ -60,8 +58,10 @@ from sglang.srt.utils import (
     crash_on_warnings,
     enable_show_time_cost,
     get_available_gpu_memory,
+    is_hip,
     monkey_patch_vllm_model_config,
     monkey_patch_vllm_p2p_access_check,
+    set_cpu_offload_max_bytes,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ class ModelRunner:
             )
 
         if self.is_multimodal:
-            logger.warning(
+            logger.info(
                 "Automatically turn off --chunked-prefill-size and adjust --mem-fraction-static for multimodal models."
             )
             server_args.chunked_prefill_size = None
@@ -141,13 +141,14 @@ class ModelRunner:
                 "triton_attention_reduce_in_fp32": server_args.triton_attention_reduce_in_fp32,
                 "disable_mla": server_args.disable_mla,
                 "torchao_config": server_args.torchao_config,
-                "disable_penalizer": server_args.disable_penalizer,
                 "enable_nan_detection": server_args.enable_nan_detection,
                 "enable_dp_attention": server_args.enable_dp_attention,
             }
         )
 
-        # Init componnets
+        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024**3))
+
+        # Init components
         min_per_gpu_memory = self.init_torch_distributed()
         self.sampler = Sampler()
         self.load_model()
@@ -178,14 +179,15 @@ class ModelRunner:
     def init_torch_distributed(self):
         logger.info("Init torch distributed begin.")
         # Init torch distributed
+        torch.get_device_module(self.device).set_device(self.gpu_id)
         if self.device == "cuda":
-            torch.cuda.set_device(self.gpu_id)
             backend = "nccl"
         # ToDO(liangan1):Just use gloo to bypass the initilization fail
         # Need to use xccl for xpu backend in the future
         elif self.device == "xpu":
-            torch.xpu.set_device(self.gpu_id)
             backend = "gloo"
+        elif self.device == "hpu":
+            backend = "hccl"
 
         if not self.server_args.enable_p2p_check:
             monkey_patch_vllm_p2p_access_check(self.gpu_id)
@@ -240,15 +242,17 @@ class ModelRunner:
             )
             return get_model(vllm_config=vllm_config)
         except ImportError:
-            return get_model(
-                model_config=self.vllm_model_config,
-                load_config=self.load_config,
-                device_config=DeviceConfig(self.device),
-                parallel_config=None,
-                scheduler_config=None,
-                lora_config=None,
-                cache_config=None,
-            )
+            pass
+
+        return get_model(
+            model_config=self.vllm_model_config,
+            load_config=self.load_config,
+            device_config=DeviceConfig(self.device),
+            parallel_config=None,
+            scheduler_config=None,
+            lora_config=None,
+            cache_config=None,
+        )
 
     def get_model_config_params(self):
         sig = inspect.signature(VllmModelConfig.__init__)
@@ -440,7 +444,10 @@ class ModelRunner:
         if self.server_args.kv_cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
-            self.kv_cache_dtype = torch.float8_e5m2
+            if is_hip():  # Using natively supported format
+                self.kv_cache_dtype = torch.float8_e5m2fnuz
+            else:
+                self.kv_cache_dtype = torch.float8_e5m2
         else:
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
@@ -632,10 +639,16 @@ class ModelRunner:
     def sample(
         self, logits_output: LogitsProcessorOutput, forward_batch: ForwardBatch
     ) -> torch.Tensor:
-        # Put CPU-heavy tasks here. They will be overlapped with the forward pass.
         sampling_info = forward_batch.sampling_info
-        sampling_info.update_regex_vocab_mask()
-        sampling_info.update_penalties()
+        if sampling_info.sampling_info_done:
+            # Overlap mode: the function update_regex_vocab_mask was executed
+            # in process_batch_result of the last batch.
+            if sampling_info.grammars:
+                sampling_info.sampling_info_done.wait()
+        else:
+            # Normal mode: Put CPU-heavy tasks here. They will be overlapped with the forward pass.
+            sampling_info.update_regex_vocab_mask()
+            sampling_info.update_penalties()
         logits = self.apply_logits_bias(logits_output.next_token_logits, sampling_info)
 
         # Sample the next tokens.
