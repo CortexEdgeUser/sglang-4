@@ -212,6 +212,7 @@ def extend(reqs, model_runner):
         token_to_kv_pool=model_runner.token_to_kv_pool,
         tree_cache=None,
         model_config=model_runner.model_config,
+        enable_overlap=False,
     )
     batch.prepare_for_extend()
     model_worker_batch = batch.get_model_worker_batch()
@@ -465,7 +466,6 @@ if __name__ == "__main__":
 
     try:
         main(server_args, bench_args)
-    except Exception as e:
-        raise e
     finally:
-        kill_child_process()
+        if server_args.tp_size != 1:
+            kill_child_process()

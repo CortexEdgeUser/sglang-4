@@ -15,6 +15,7 @@
 
 import base64
 import ipaddress
+import itertools
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ import time
 import warnings
 from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Union
 
 import numpy as np
 import psutil
@@ -45,6 +46,7 @@ from packaging import version as pkg_version
 from starlette.routing import Mount
 from torch import nn
 from torch.func import functional_call
+from torch.library import Library
 from torch.profiler import ProfilerActivity, profile, record_function
 from triton.runtime.cache import (
     FileCacheManager,
@@ -70,7 +72,7 @@ def is_flashinfer_available():
     Check whether flashinfer is available.
     As of Oct. 6, 2024, it is only available on NVIDIA GPUs.
     """
-    if os.environ.get("SGLANG_IS_FLASHINFER_AVAILABLE", "true") == "false":
+    if not get_bool_env_var("SGLANG_IS_FLASHINFER_AVAILABLE", default="true"):
         return False
     return torch.cuda.is_available() and not is_hip()
 
@@ -515,6 +517,11 @@ def monkey_patch_vllm_p2p_access_check(gpu_id: int):
 
     setattr(tgt, "gpu_p2p_access_check", lambda *arg, **kwargs: True)
 
+    # Suppress the warnings from this delete function when using sglang.bench_one_batch
+    from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
+
+    setattr(CustomAllreduce, "__del__", lambda *args, **kwargs: None)
+
 
 vllm_all_gather_backup = None
 
@@ -624,7 +631,7 @@ def add_api_key_middleware(app, api_key: str):
 
 
 def prepare_model_and_tokenizer(model_path: str, tokenizer_path: str):
-    if "SGLANG_USE_MODELSCOPE" in os.environ:
+    if get_bool_env_var("SGLANG_USE_MODELSCOPE"):
         if not os.path.exists(model_path):
             from modelscope import snapshot_download
 
@@ -929,4 +936,99 @@ def get_nvgpu_memory_capacity():
 
 def crash_on_warnings():
     # Crash on warning if we are running CI tests
-    return os.getenv("SGLANG_IS_IN_CI", "false") == "true"
+    return get_bool_env_var("SGLANG_IS_IN_CI")
+
+
+def get_device_name(device_id: int = 0) -> str:
+    if hasattr(torch, "cuda") and torch.cuda.is_available():
+        return torch.cuda.get_device_name(device_id)
+
+    if hasattr(torch, "hip") and torch.hip.is_available():
+        return torch.hip.get_device_name(device_id)
+
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return torch.xpu.get_device_name(device_id)
+
+    if hasattr(torch, "hpu") and torch.hpu.is_available():
+        return torch.hpu.get_device_name(device_id)
+
+
+sglang_lib = Library("sglang", "FRAGMENT")  # noqa
+
+
+def direct_register_custom_op(
+    op_name: str,
+    op_func: Callable,
+    mutates_args: List[str],
+    fake_impl: Optional[Callable] = None,
+    target_lib: Optional[Library] = None,
+):
+    """
+    `torch.library.custom_op` can have significant overhead because it
+    needs to consider complicated dispatching logic. This function
+    directly registers a custom op and dispatches it to the CUDA backend.
+    See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
+    for more details.
+
+    By default, the custom op is registered to the vLLM library. If you
+    want to register it to a different library, you can pass the library
+    object to the `target_lib` argument.
+
+    IMPORTANT: the lifetime of the operator is tied to the lifetime of the
+    library object. If you want to bind the operator to a different library,
+    make sure the library object is alive when the operator is used.
+    """
+    import torch.library
+
+    if hasattr(torch.library, "infer_schema"):
+        schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
+    else:
+        # for pytorch 2.4
+        import torch._custom_op.impl
+
+        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
+
+    my_lib = target_lib or sglang_lib
+    my_lib.define(op_name + schema_str)
+    my_lib.impl(op_name, op_func, "CUDA")
+    if fake_impl is not None:
+        my_lib._register_fake(op_name, fake_impl)
+
+
+def set_gpu_proc_affinity(
+    tp_size: int,
+    nnodes: int,
+    gpu_id: int,
+):
+    # current process
+    pid = os.getpid()
+    p = psutil.Process(pid)
+
+    tp_size_per_node = tp_size // nnodes
+
+    # total physical cores
+    total_pcores = psutil.cpu_count(logical=False)
+    # physical cores per TP (N.B. more Cores than GPUs on node)
+    num_cores_bind = total_pcores // tp_size_per_node
+
+    # able to handle multiple DP per node
+    start_cpu_id = (gpu_id * num_cores_bind) % total_pcores
+    end_cpu_id = start_cpu_id + num_cores_bind
+
+    if psutil.cpu_count() != psutil.cpu_count(logical=False):
+        # HT on
+        upper_cpu_ids = [id for id in range(start_cpu_id, end_cpu_id)]
+        lower_cpu_ids = [id + total_pcores for id in range(start_cpu_id, end_cpu_id)]
+        bind_cpu_ids = list(itertools.chain(upper_cpu_ids, lower_cpu_ids))
+    else:
+        # HT off
+        bind_cpu_ids = [id for id in range(start_cpu_id, end_cpu_id)]
+
+    # set cpu_affinity to current process
+    p.cpu_affinity(bind_cpu_ids)
+    logger.info(f"Process {pid} gpu_id {gpu_id} is running on CPUs: {p.cpu_affinity()}")
+
+
+def get_bool_env_var(name: str, default: str = "false") -> bool:
+    value = os.getenv(name, default)
+    return value.lower() in ("true", "1")
