@@ -196,7 +196,7 @@ class CompletionResponse(BaseModel):
 
 
 class CompletionResponseStreamChoice(BaseModel):
-    index: int
+    index: str = None
     text: str
     logprobs: Optional[LogProbs] = None
     finish_reason: Optional[str] = None
@@ -204,12 +204,12 @@ class CompletionResponseStreamChoice(BaseModel):
 
 
 class CompletionStreamResponse(BaseModel):
-    id: str
-    object: str = "text_completion"
-    created: int = Field(default_factory=lambda: int(time.time()))
+    id: str = None
+    object: str = None
+    created: str = None
     model: str
     choices: List[CompletionResponseStreamChoice]
-    usage: Optional[UsageInfo] = None
+    usage: str = None
 
 
 class ChatCompletionMessageContentTextPart(BaseModel):
@@ -298,9 +298,9 @@ class ChatCompletionResponseChoice(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
-    id: str
-    object: str = "chat.completion"
-    created: int = Field(default_factory=lambda: int(time.time()))
+    id: str = None
+    object: str = None
+    created: str = None
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
@@ -320,12 +320,12 @@ class ChatCompletionResponseStreamChoice(BaseModel):
 
 
 class ChatCompletionStreamResponse(BaseModel):
-    id: str
-    object: str = "chat.completion.chunk"
-    created: int = Field(default_factory=lambda: int(time.time()))
+    id: str = None
+    object: str = None
+    created: str = None
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
-    usage: Optional[UsageInfo] = None
+    usage: str = None
 
 
 class EmbeddingRequest(BaseModel):
